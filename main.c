@@ -34,18 +34,20 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include <linux/inotify.h>
 #include <errno.h>
 
-#define EVENT_SIZE  ( sizeof (struct inotify_event) )
-#define EVENT_BUF_LEN     ( 1024 * ( EVENT_SIZE + 16 ) )
-#define SERVER_PORT            (8080)
-#define PEND_CONNECTIONS     	100     
+#define EVENT_SIZE  			( sizeof (struct inotify_event) )
+#define EVENT_BUF_LEN     		( 1024 * ( EVENT_SIZE + 16 ) )
+#define SERVER_PORT            	(20904)
+#define PEND_CONNECTIONS     	5000     
 #define BUF_SIZE            	1024
 #define OK_TEXT 				"HTTP/1.0 200 OK\nContent-Type:text/html\n\n"
 #define ERROR_400				"HTTP/1.0 404 Not Found\nContent-Type:text/html\n\n"
+#define ERROR_500				"HTTP/1.0 500 Internal Server Error\nContent-Type:text/html\n\n"
+#define MAX_THREADS 			10000
 
 void *handle_client(void*);
 void *handle_file_system(void*);
 map_t map;
-pthread_mutex_t map_mutex;
+static pthread_mutex_t map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 typedef struct file_entry {
 	char * content;
@@ -55,20 +57,22 @@ typedef struct file_entry {
 
 
 int main() {
-
-	unsigned int          	server_s;             
+	unsigned int 			thread_count;
+	int          	server_s;             
 	struct sockaddr_in    	server_addr;          
 	struct sockaddr_in    	client_addr; 
 	
-	unsigned int    		client_s;     
+	int    		client_s;     
 	int                   	addr_len;
 	int 					socket_thread;   
 	int 					fsystem_thread;
-	pthread_attr_t       	attr;                   //  pthread attributes
-  	pthread_t             	threads;                // Thread ID (used by OS
+	pthread_attr_t       	attr;                  
+  	pthread_t             	threads;               
   	pthread_t 				inot_thread;
   	int err;
   	int tr = 1;
+
+  	thread_count = 0;
 
 	/*Create hasmap for file cache*/  	
   	map = hashmap_new();
@@ -77,6 +81,10 @@ int main() {
 	server_s = socket(AF_INET, SOCK_STREAM, 0);
 	/*Thread creation attributes*/
 	pthread_attr_init(&attr);
+	pthread_attr_setstacksize(&attr, 65536);
+	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_JOINABLE);
+	/*Mutex initialization*/
+	pthread_mutex_init(&map_mutex, NULL);
 	/*Create file change notification thread*/
 	pthread_create(
 			&inot_thread,
@@ -88,7 +96,6 @@ int main() {
 	/*Set detached attribute to threads. We do not need to wait for threads to finish*/
 	pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 	setsockopt(server_s,SOL_SOCKET,SO_REUSEADDR,&tr,sizeof(int));
-	//setNonblocking(server_s);
 
 	/*Create server address structure*/
 	memset(&server_addr, 0, sizeof(server_addr));
@@ -105,19 +112,18 @@ int main() {
     		/*Client connection acceptance loop*/
     		while(1) {
 		    	/*Accept client connections */
-		    	;
-
 		    	if((client_s = accept(server_s, (struct sockaddr *)&client_addr, &addr_len)) < 0) {
 		    		perror("accept");
 		    	} else {
 		    		/*Create thread that will handle http request*/
 		    		socket_thread = client_s;   		
-		    		pthread_create(
-		    				&threads,
-		    				&attr,
-		    				handle_client,
-		    				&socket_thread
-		    			);
+
+		    		if( pthread_create(&threads,&attr,handle_client,&socket_thread) != 0) {
+		    			perror("pthread_create");
+		    			close(client_s);
+		    		} else {
+		    			thread_count++;
+		    		}
 		    	}
 		    }
     	} else {
@@ -126,6 +132,8 @@ int main() {
     } else {
     	perror("bind");
     }
+
+    pthread_attr_destroy(&attr);
     
 }
 
@@ -144,10 +152,9 @@ void * handle_file_system(void * arg) {
 		/*Success on inotify*/
 	}
 
-	/*Add watch for file create, file delete and file modify on close*/
-	wd = inotify_add_watch( fd, "./", IN_CREATE | IN_DELETE | IN_CLOSE_WRITE);
+	/*Add watch for file delete and file modify on close*/
+	wd = inotify_add_watch( fd, "./", IN_DELETE | IN_CLOSE_WRITE);
 
-	//setNonblocking(fd);
 
 	while(1){
 		i = 0;
@@ -159,7 +166,7 @@ void * handle_file_system(void * arg) {
 		} else {
 			/*checking for error*/
 			if ( length < 0 ) {
-				//perror( "read" );
+				perror( "read" );
 			}  
 
 			/*Iterate over read events from inotify file descriptor*/
@@ -168,9 +175,6 @@ void * handle_file_system(void * arg) {
 				/*If we have an event with a length*/
 				if ( event->len ) {
 
-
-
-			  		
 			  		/*Retrieve file stats*/
 			  		if ( stat(event->name, &fileStats ) < 0 ) {
 			  		} else {
@@ -180,6 +184,7 @@ void * handle_file_system(void * arg) {
 			  		/*Handle file reading*/
 			  		if ( event->mask & IN_CLOSE_WRITE ) {
 			  			sFile *fEntry;
+
 
 			  			 pthread_mutex_lock(&map_mutex);
 			        	/*Read Hash*/
@@ -203,9 +208,7 @@ void * handle_file_system(void * arg) {
 							    		/*No automatic signal restart*/
 							    		/*Read file*/
 							    		int readbytes = read(fh, fEntry->content, fEntry->contentSize);
-
-							    		
-							    		
+    		
 							    		if( errno == EINTR){
 							    			/*Read again*/
 							    			printf("error\n");
@@ -262,22 +265,29 @@ void * handle_file_system(void * arg) {
 }
 
 void * handle_client(void* arg) {
-	unsigned int    myClient_s;         
+	int    myClient_s;         
 	char           in_buf[BUF_SIZE];
 	char           out_buf[BUF_SIZE];
 	unsigned int   buf_len;             
-	unsigned int   fh;                
+	int   fh;                
 	char           *file_name;        
 	int 		   is_missing;
+	int            readBytes;
 	struct stat fileStats;
 	sFile *fEntry;
+	sFile *tmpEntry;
 
 	/*Copy socket from thread argument*/
 	myClient_s = *(unsigned int *)arg;
 	/*Receive information from socket*/
-	if( recv(myClient_s, in_buf, BUF_SIZE, 0) < 0 ) {
+	if( (readBytes = recv(myClient_s, in_buf, BUF_SIZE, 0)) < 0 ) {
 		/*Did not receive from socket successfully*/
-	} else {
+		perror("recv");
+	} else if (readBytes == 0) {
+		printf("Received 0 bytes\n");
+	}else {
+		//printf("%s", in_buf);
+		//printf("%d readBytes %d\n", myClient_s, readBytes);
 		/*Extract file from received header*/
 		strtok(in_buf, " ");
         file_name = strtok(NULL, " ");
@@ -286,37 +296,36 @@ void * handle_client(void* arg) {
 
         if(file_name != NULL)
         {
-	        printf("Request for: %s\n", file_name);
+	        //printf("Request for: %s\n", file_name);
+
 
 	        pthread_mutex_lock(&map_mutex);
         	/*Read Hash*/
         	is_missing = hashmap_get(map, &file_name[1], (void**)(&fEntry));
-        	/*Unlock hash*/
+          	/*Unlock hash*/
         	pthread_mutex_unlock(&map_mutex);
 
         	if( MAP_MISSING == is_missing){
-
 		        if( (fh = open(&file_name[1], O_RDONLY, S_IREAD)) == -1 ) {
 		        	/*Handle HTML 400 ERROR*/
-		        	strcpy(out_buf, ERROR_400);
-		        	send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
 		        } else {
 	        		/*Retrieve file stats*/
 		        	if ( stat(&file_name[1], &fileStats ) < 0) {
-
+		        		perror("stat");
 		        	} else {
 		        		/*Allocate memory for file entry*/
 		        		fEntry = malloc(sizeof(sFile));
-					    fEntry->contentSize = fileStats.st_size;
-					    fEntry->content = malloc(fEntry->contentSize);
+					    fEntry->content = malloc(fileStats.st_size);
 
 		        		while(1) {
 		        			/*Read the file and save it to cache*/
-		        			int readBytes = read(fh, fEntry->content, fEntry->contentSize);
-		        			
+		        			int readBytes = read(fh, fEntry->content, fileStats.st_size);
+		        			fEntry->contentSize = readBytes;
+		        			printf("Read %d bytes\n", fEntry->contentSize);
 	        				/*No automatic signal restart*/
 		        			if( errno == EINTR ) {
 		        				/*Retry*/
+		        				printf("@");
 		        			} else {
 					        	/*Lock Hash*/
 							    pthread_mutex_lock(&map_mutex);
@@ -327,7 +336,6 @@ void * handle_client(void* arg) {
 					        	break;
 		        			}
 		        		}
-				        	
 		        	}
 		        } 
 
@@ -336,20 +344,33 @@ void * handle_client(void* arg) {
 				/*File exists in cache.*/
 			}
 
-			
+
 			/*Send content*/
 			if(fEntry != NULL){
 				strcpy(out_buf, OK_TEXT);
-					send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
-				if(fEntry->contentSize > 0)
-					send(myClient_s, fEntry->content, fEntry->contentSize, MSG_NOSIGNAL);
+				send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
+				pthread_mutex_lock(&map_mutex);
+				send(myClient_s, fEntry->content, fEntry->contentSize, MSG_NOSIGNAL);
+				pthread_mutex_unlock(&map_mutex);
+			} else if ( fh == -1 ){
+				strcpy(out_buf, ERROR_400);
+		        send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
+		        printf("400 File not found\n");
+			} else {
+				strcpy(out_buf, ERROR_500);
+				send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
+				printf("500 Internal Sever Error %d\n", is_missing);
 			}
-			
+		} else {
+			printf("NULL File Name\n");
 		}
-		/*Handle closing*/
-		close(fh);  
-		close(myClient_s); 
+
+
 	}
+
+	/*Handle closing*/
+	close(fh);  
+	close(myClient_s);
 	
 }
 
