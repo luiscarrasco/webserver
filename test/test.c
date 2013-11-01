@@ -2,8 +2,11 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
 #include <netinet/in.h>    
-#include <sys/socket.h>    
+#include <sys/socket.h>   
+#include <sys/types.h> 
 #include <arpa/inet.h>  
 #include <string.h>
 #include <netdb.h>
@@ -12,7 +15,7 @@
 #define MAX_THREADS 	500
 #define STATUS_SUCCESS 	0
 #define STATUS_FAILED  	1
-#define SERVER_PORT   	20904
+#define SERVER_PORT   	80
 #define BUF_SIZE        500
 
 
@@ -28,14 +31,39 @@ const char* GetRequest = "GET /main.c HTTP/1.1\n"
 
 void *http_client(void*);
 
+struct server_info {
+	char * server_ip;
+	int    port;
+};
 
-int main() {
+
+int main(int argc, char **argv) {
 	int 			thread_ctr;
 	pthread_t 		tids[MAX_THREADS];
 	pthread_attr_t  attr;     
 	int 			retvals[MAX_THREADS];
 	int 			failures = 0;
+	int opt;
+	char *server;
+	struct server_info * si;
 	
+
+	while ((opt = getopt(argc, argv, "s:")) != -1) {
+		switch(opt) {
+			case 's':
+				server = malloc(strlen(optarg));
+				strcpy(server, optarg);
+				si = malloc(sizeof(struct server_info));
+				si->server_ip = strtok(server, ":");
+				si->port = atoi(strtok(NULL,":"));
+				break;
+			default:
+				fprintf(stderr, "Usage: %s [-s server name]\n", argv[0]);
+				exit(EXIT_FAILURE);
+		}
+	}
+
+
 
 	/*Initialize pthread attributes*/
 	pthread_attr_init(&attr);
@@ -49,7 +77,7 @@ int main() {
 			&(tids[thread_ctr]),
 			&attr,
 			http_client,
-			NULL
+			&si
 		);
 
 		if(ret != 0) {
@@ -87,6 +115,13 @@ void *http_client(void* arg) {
 	struct timeval 			tv;
 	int                     fail;
 	int bytes_total = 0;
+	char *server_url;
+	char *server;
+	int port;
+	struct hostnet     *he;
+	char *saveptr1, *saveptr2;
+	struct server_info *si;
+
 
 	bytes_recieved = 0;
 	/* 30 Secs Timeout */
@@ -97,6 +132,7 @@ void *http_client(void* arg) {
 	lg.l_onoff = 1;
 	lg.l_linger = 3;
 
+	si = (struct server_info*)arg;
 	/*Initialize socket*/
 	server_s = socket(AF_INET, SOCK_STREAM, 0);
 
@@ -105,10 +141,11 @@ void *http_client(void* arg) {
 	/*Create server address structure*/
 
 	bzero(&server_addr, sizeof(server_addr));
+    
 
+    server_addr.sin_addr.s_addr = inet_addr(si->server_ip);
+    server_addr.sin_port = 		htons(si->port);
     server_addr.sin_family = 	AF_INET;
-    server_addr.sin_addr.s_addr =   inet_addr("10.15.200.32");
-    server_addr.sin_port = 		htons(SERVER_PORT);
 
     if(server_s < 0) {
     	perror("socket");
