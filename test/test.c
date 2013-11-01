@@ -16,7 +16,7 @@
 #define STATUS_SUCCESS 	0
 #define STATUS_FAILED  	1
 #define SERVER_PORT   	80
-#define BUF_SIZE        500
+#define BUF_SIZE        50000
 
 
 const char* GetRequest = "GET /main.c HTTP/1.1\n"
@@ -36,6 +36,7 @@ struct server_info {
 	int    port;
 };
 
+static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
 int main(int argc, char **argv) {
 	int 			thread_ctr;
@@ -45,7 +46,7 @@ int main(int argc, char **argv) {
 	int 			failures = 0;
 	int opt;
 	char *server;
-	struct server_info * si;
+	static struct server_info * si;
 	
 
 	while ((opt = getopt(argc, argv, "s:")) != -1) {
@@ -56,6 +57,7 @@ int main(int argc, char **argv) {
 				si = malloc(sizeof(struct server_info));
 				si->server_ip = strtok(server, ":");
 				si->port = atoi(strtok(NULL,":"));
+				printf("server ip:%s\n", si->server_ip);
 				break;
 			default:
 				fprintf(stderr, "Usage: %s [-s server name]\n", argv[0]);
@@ -77,7 +79,7 @@ int main(int argc, char **argv) {
 			&(tids[thread_ctr]),
 			&attr,
 			http_client,
-			&si
+			si
 		);
 
 		if(ret != 0) {
@@ -111,6 +113,7 @@ void *http_client(void* arg) {
 	int   			        server_s;
 	struct sockaddr_in    	server_addr;
 	int 					bytes_recieved;
+	int  					bytes_sent;
 	struct linger 			lg;
 	struct timeval 			tv;
 	int                     fail;
@@ -123,7 +126,9 @@ void *http_client(void* arg) {
 	struct server_info *si;
 
 
+
 	bytes_recieved = 0;
+	bytes_sent = 0;
 	/* 30 Secs Timeout */
 	tv.tv_sec = 3;
 	tv.tv_usec = 0;
@@ -132,22 +137,25 @@ void *http_client(void* arg) {
 	lg.l_onoff = 1;
 	lg.l_linger = 3;
 
+
+	bzero(&server_addr, sizeof(server_addr));
+
+	
 	si = (struct server_info*)arg;
+
+	printf("server: %s\n",si->server_ip);
+	server_addr.sin_addr.s_addr = inet_addr(si->server_ip);
+    server_addr.sin_port = 		htons(si->port);
+    server_addr.sin_family = 	AF_INET;
 	/*Initialize socket*/
+
 	server_s = socket(AF_INET, SOCK_STREAM, 0);
 
 	setsockopt(server_s, SOL_SOCKET, SO_RCVTIMEO, (char *)&tv,sizeof(struct timeval));
 	setsockopt(server_s, SOL_SOCKET, SO_LINGER , (char *)&lg,sizeof(struct linger));
 	/*Create server address structure*/
 
-	bzero(&server_addr, sizeof(server_addr));
-    
-
-    server_addr.sin_addr.s_addr = inet_addr(si->server_ip);
-    server_addr.sin_port = 		htons(si->port);
-    server_addr.sin_family = 	AF_INET;
-
-    if(server_s < 0) {
+	if(server_s < 0) {
     	perror("socket");
     } else {
     	/*Connect to server*/
@@ -155,17 +163,28 @@ void *http_client(void* arg) {
 	    	perror("connect");
 	    } else {
 	    	/*Wait for response*/
-			if (write(server_s, GetRequest, strlen(GetRequest)) < 0) {
+	    	bytes_sent = sendBytes(server_s, GetRequest, strlen(GetRequest));
+
+			if (bytes_sent < 0) {
 				perror("write");
 			} else {
+				char * rcv_ptr = in_buf; 
 
-				bytes_recieved = read(server_s, in_buf, BUF_SIZE);
+				//printf("Sent %d bytes\n", bytes_sent);
+
+				while((bytes_recieved = read(server_s, rcv_ptr, BUF_SIZE)) > 0)
+				{
+					rcv_ptr += bytes_recieved;
+				}
+
+				bytes_recieved = rcv_ptr - in_buf;
+
 				printf("Read %d bytes\n", bytes_recieved);
 				if(bytes_recieved < 0) {
 					perror("read");
 					printf("%d\n", errno);
 				} else if(bytes_recieved == 0) {
-					printf("Socket has been closed\n");
+					//printf("Socket has been closed\n");
 				} else {
 					in_buf[bytes_recieved] = '\0';
 				}
@@ -184,4 +203,22 @@ void *http_client(void* arg) {
 	}
 
 	return (void *)STATUS_SUCCESS;
+}
+
+int sendBytes(int socket, char * bytes, size_t buffer_size) {
+	int bytes_sent = 0;
+	char * sent = bytes;
+
+	while(bytes_sent < buffer_size) {
+		int bsent = send(socket, sent,buffer_size-bytes_sent, MSG_NOSIGNAL);
+		if( bsent < 0) {
+			bytes_sent = bsent;
+			break;
+		}
+
+		sent += bsent;
+		bytes_sent += bsent;
+	}
+
+	return bytes_sent;
 }

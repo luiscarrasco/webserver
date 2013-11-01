@@ -279,13 +279,15 @@ void * handle_client(void* arg) {
 
 	/*Copy socket from thread argument*/
 	myClient_s = *(unsigned int *)arg;
+
 	/*Receive information from socket*/
+
 	if( (readBytes = recv(myClient_s, in_buf, BUF_SIZE, 0)) < 0 ) {
-		/*Did not receive from socket successfully*/
-		perror("recv");
-	} else if (readBytes == 0) {
-		printf("Received 0 bytes\n");
-	}else {
+	    /*Did not receive from socket successfully*/
+        perror("recv");
+    } else if (readBytes == 0) {
+        printf("Received 0 bytes\n");
+    } else {
 		//printf("%s", in_buf);
 		//printf("%d readBytes %d\n", myClient_s, readBytes);
 		/*Extract file from received header*/
@@ -347,18 +349,20 @@ void * handle_client(void* arg) {
 
 			/*Send content*/
 			if(fEntry != NULL){
-				strcpy(out_buf, OK_TEXT);
-				send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
+	
 				pthread_mutex_lock(&map_mutex);
-				send(myClient_s, fEntry->content, fEntry->contentSize, MSG_NOSIGNAL);
+			    strcpy(out_buf, OK_TEXT);
+				strcat(out_buf, fEntry->content);
+				sendBytes(myClient_s, out_buf, strlen(out_buf));
 				pthread_mutex_unlock(&map_mutex);
+				
 			} else if ( fh == -1 ){
 				strcpy(out_buf, ERROR_400);
-		        send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
-		        printf("400 File not found\n");
+		        sendBytes(myClient_s, out_buf, strlen(out_buf));
+		        printf("%s 400 File not found\n", file_name);
 			} else {
 				strcpy(out_buf, ERROR_500);
-				send(myClient_s, out_buf, strlen(out_buf), MSG_NOSIGNAL );
+				sendBytes(myClient_s, out_buf, strlen(out_buf));
 				printf("500 Internal Sever Error %d\n", is_missing);
 			}
 		} else {
@@ -372,5 +376,23 @@ void * handle_client(void* arg) {
 	close(fh);  
 	close(myClient_s);
 	
+}
+
+int sendBytes(int socket, char * bytes, size_t buffer_size) {
+	int bytes_sent = 0;
+	char * sent = bytes;
+
+	while(bytes_sent < buffer_size) {
+		int bsent = send(socket, sent,buffer_size-bytes_sent, MSG_NOSIGNAL);
+		if( bsent < 0) {
+			bytes_sent = bsent;
+			break;
+		}
+
+		sent += bsent;
+		bytes_sent += bsent;
+	}
+
+	return bytes_sent;
 }
 
